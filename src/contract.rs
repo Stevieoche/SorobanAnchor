@@ -17,6 +17,7 @@ use crate::replay_detection::{self, ReplayMetrics};
 use crate::admin_audit_log::AdminAuditLog;
 use crate::service_management::ServiceManager;
 use crate::sep38;
+use crate::session_quota::{SessionQuotaEnforcer, SessionQuotaPolicy, SessionQuotaState};
 
 /// Score penalty (in [0,1] units) applied to anomalous anchors in `score_anchor_with_anomaly`.
 /// Default: 0.20 (equivalent to 20 out of 100 score points).
@@ -1140,6 +1141,13 @@ pub const DEFAULT_SESSION_TTL: u64 = 3600;
 
 /// Maximum operations allowed per session before it is considered exhausted.
 pub const MAX_OPS_PER_SESSION: u64 = 100;
+
+/// Maximum number of attestations allowed in a single batch submission.
+const MAX_BATCH_SIZE: usize = 50;
+
+/// Rate-limit slots consumed per attestation in a batch submission.
+/// Each batch item counts as this many individual submissions.
+const BATCH_ATTESTATION_RATE_MULTIPLIER: u32 = 1;
 
 /// Minimum TTL for replay-protection entries (7 days in ledgers at ~5 s/ledger).
 pub const REPLAY_TTL: u32 = 120_960;
@@ -4421,15 +4429,10 @@ impl AnchorKitContract {
             .get(&sess_key)
             .unwrap_or_else(|| panic_with_error!(env, ErrorCode::SessionNotFound));
         Self::validate_session(env, &session);
-        // #232: enforce per-session operation limit
-        let op_count: u64 = env
-            .storage()
-            .persistent()
-            .get(&make_storage_key(env, &[b"SOPCNT", &session_id.to_be_bytes()]))
-            .unwrap_or(0u64);
-        if op_count >= MAX_OPS_PER_SESSION {
-            panic_with_error!(env, ErrorCode::SessionOperationLimitExceeded);
-        }
+        // Delegate quota enforcement to SessionQuotaEnforcer so that the
+        // effective limit respects per-session overrides and the global policy
+        // rather than the hard-coded MAX_OPS_PER_SESSION constant.
+        SessionQuotaEnforcer::check_and_increment(env, session_id);
     }
 
     // -----------------------------------------------------------------------
@@ -7736,5 +7739,143 @@ impl AnchorKitContract {
             sep31: true,
             sep38: true,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Session quota management
+    // -----------------------------------------------------------------------
+
+    /// Set the global session operation quota policy.
+    ///
+    /// All sessions that do not have a per-session override will be governed by
+    /// this policy. A `max_operations` value of `0` disables enforcement
+    /// (unlimited operations).
+    ///
+    /// # Authorization
+    ///
+    /// Admin-only.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_operations` - Maximum operations per session (`0` = unlimited).
+    pub fn set_session_quota_policy(env: Env, max_operations: u64) {
+        Self::require_admin(&env);
+        let policy = SessionQuotaPolicy::with_limit(max_operations);
+        SessionQuotaEnforcer::set_global_policy(&env, &policy);
+        AdminAuditLog::log_change(
+            &env,
+            &Self::get_admin_internal(&env),
+            "set_session_quota_policy",
+            "global",
+            "",
+            &alloc::format!("{}", max_operations),
+        );
+        env.events().publish(
+            (symbol_short!("sess_qt"), symbol_short!("policy")),
+            max_operations,
+        );
+    }
+
+    /// Return the global session quota policy currently in effect.
+    pub fn get_session_quota_policy(env: Env) -> SessionQuotaPolicy {
+        SessionQuotaEnforcer::get_global_policy(&env)
+    }
+
+    /// Override the session quota for a specific session.
+    ///
+    /// The per-session override takes precedence over the global policy for
+    /// `session_id` only. Useful for granting trusted callers a higher limit
+    /// without raising the global cap.
+    ///
+    /// # Authorization
+    ///
+    /// Admin-only.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_id`     - Target session.
+    /// * `max_operations` - Maximum operations for this session (`0` = unlimited).
+    pub fn set_session_quota_override(env: Env, session_id: u64, max_operations: u64) {
+        Self::require_admin(&env);
+        let policy = SessionQuotaPolicy::with_limit(max_operations);
+        SessionQuotaEnforcer::set_session_override(&env, session_id, &policy);
+        AdminAuditLog::log_change(
+            &env,
+            &Self::get_admin_internal(&env),
+            "set_session_quota_override",
+            &alloc::format!("{}", session_id),
+            "",
+            &alloc::format!("{}", max_operations),
+        );
+        env.events().publish(
+            (symbol_short!("sess_qt"), symbol_short!("override"), session_id),
+            max_operations,
+        );
+    }
+
+    /// Remove the per-session quota override for `session_id`, reverting to the
+    /// global policy.
+    ///
+    /// # Authorization
+    ///
+    /// Admin-only.
+    pub fn clear_session_quota_override(env: Env, session_id: u64) {
+        Self::require_admin(&env);
+        SessionQuotaEnforcer::clear_session_override(&env, session_id);
+        AdminAuditLog::log_change(
+            &env,
+            &Self::get_admin_internal(&env),
+            "clear_session_quota_override",
+            &alloc::format!("{}", session_id),
+            "",
+            "",
+        );
+    }
+
+    /// Reset the operation counter for `session_id` to zero.
+    ///
+    /// After a reset the session can accept up to its configured `max_operations`
+    /// additional operations. Each reset is recorded in the quota state so callers
+    /// can audit how many times a session has been freed.
+    ///
+    /// # Authorization
+    ///
+    /// Admin-only.
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::SessionNotFound`] when `session_id` does not exist.
+    pub fn reset_session_quota(env: Env, session_id: u64) {
+        Self::require_admin(&env);
+        // Verify the session exists before touching quota state.
+        let sess_key = make_storage_key(&env, &[b"SESS", &session_id.to_be_bytes()]);
+        if !env.storage().persistent().has(&sess_key) {
+            panic_with_error!(&env, ErrorCode::SessionNotFound);
+        }
+        SessionQuotaEnforcer::reset(&env, session_id);
+        AdminAuditLog::log_change(
+            &env,
+            &Self::get_admin_internal(&env),
+            "reset_session_quota",
+            &alloc::format!("{}", session_id),
+            "",
+            "0",
+        );
+    }
+
+    /// Return a snapshot of the quota state for `session_id`.
+    ///
+    /// Includes the effective policy, current operation count, remaining
+    /// capacity, reset count, and exhaustion flag. Does not modify any state.
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::SessionNotFound`] when `session_id` does not exist.
+    pub fn get_session_quota_state(env: Env, session_id: u64) -> SessionQuotaState {
+        let sess_key = make_storage_key(&env, &[b"SESS", &session_id.to_be_bytes()]);
+        if !env.storage().persistent().has(&sess_key) {
+            panic_with_error!(&env, ErrorCode::SessionNotFound);
+        }
+        SessionQuotaEnforcer::get_state(&env, session_id)
     }
 }

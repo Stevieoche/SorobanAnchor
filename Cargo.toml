@@ -82,10 +82,10 @@ jsonschema = "0.17"
 soroban-sdk = { version = "21.7.0", features = ["testutils"] }
 base64 = "0.22"
 rand = "0.8"
-criterion = { version = "0.5", features = ["html_reports"] }
+# criterion = { version = "0.5", features = ["html_reports"] }  # requires anes (not cached)
 jsonschema = "0.17"
-assert_cmd = "2.0"
-predicates = "3.0"
+# assert_cmd = "2.0"   # requires anes transitively
+# predicates = "3.0"   # requires anes transitively
 
 [profile.release]
 opt-level = "z"
