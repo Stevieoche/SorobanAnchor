@@ -21,16 +21,9 @@
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
-              "vec": [
-                {
-                  "symbol": "JTI"
-                },
-                {
-                  "bytes": "756e697175652d6a74692d616263"
-                }
-              ]
+              "bytes": "33ec3139f1ba6278a3eac9cc0fe45588e0874f9b284cc1ac4b65e093f936b5aa"
             },
-            "durability": "temporary"
+            "durability": "persistent"
           }
         },
         [
@@ -41,16 +34,9 @@
                 "ext": "v0",
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
                 "key": {
-                  "vec": [
-                    {
-                      "symbol": "JTI"
-                    },
-                    {
-                      "bytes": "756e697175652d6a74692d616263"
-                    }
-                  ]
+                  "bytes": "33ec3139f1ba6278a3eac9cc0fe45588e0874f9b284cc1ac4b65e093f936b5aa"
                 },
-                "durability": "temporary",
+                "durability": "persistent",
                 "val": {
                   "bool": true
                 }
@@ -58,7 +44,7 @@
             },
             "ext": "v0"
           },
-          4000
+          4095
         ]
       ],
       [

@@ -1,17 +1,16 @@
 {
   "generators": {
-    "address": 2,
+    "address": 1,
     "nonce": 0
   },
   "auth": [
-    [],
     [],
     []
   ],
   "ledger": {
     "protocol_version": 21,
-    "sequence_number": 0,
-    "timestamp": 0,
+    "sequence_number": 200,
+    "timestamp": 2000000,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -21,9 +20,16 @@
       [
         {
           "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
-              "bytes": "46036a9c87040d79dbe94b2f008a777bc6abbe1900f344ac90524555784605dc"
+              "vec": [
+                {
+                  "symbol": "SQ_OVR"
+                },
+                {
+                  "u64": 42
+                }
+              ]
             },
             "durability": "persistent"
           }
@@ -34,27 +40,34 @@
             "data": {
               "contract_data": {
                 "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
                 "key": {
-                  "bytes": "46036a9c87040d79dbe94b2f008a777bc6abbe1900f344ac90524555784605dc"
+                  "vec": [
+                    {
+                      "symbol": "SQ_OVR"
+                    },
+                    {
+                      "u64": 42
+                    }
+                  ]
                 },
                 "durability": "persistent",
                 "val": {
                   "map": [
                     {
                       "key": {
-                        "symbol": "max_submissions"
+                        "symbol": "max_operations"
                       },
                       "val": {
-                        "u32": 20
+                        "u64": 5
                       }
                     },
                     {
                       "key": {
-                        "symbol": "window_length"
+                        "symbol": "updated_at"
                       },
                       "val": {
-                        "u32": 200
+                        "u64": 2000000
                       }
                     }
                   ]
@@ -63,13 +76,13 @@
             },
             "ext": "v0"
           },
-          4095
+          1555400
         ]
       ],
       [
         {
           "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": "ledger_key_contract_instance",
             "durability": "persistent"
           }
@@ -80,7 +93,7 @@
             "data": {
               "contract_data": {
                 "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
                 "key": "ledger_key_contract_instance",
                 "durability": "persistent",
                 "val": {
@@ -91,10 +104,27 @@
                     "storage": [
                       {
                         "key": {
-                          "bytes": "61ee56aed3819b42f09108556eee956c890062b8e3867224878f4afd8d5e8c5b"
+                          "symbol": "SESS_QT"
                         },
                         "val": {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "max_operations"
+                              },
+                              "val": {
+                                "u64": 20
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "updated_at"
+                              },
+                              "val": {
+                                "u64": 2000000
+                              }
+                            }
+                          ]
                         }
                       }
                     ]
@@ -104,7 +134,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518600
         ]
       ],
       [
@@ -125,7 +155,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518600
         ]
       ]
     ]
