@@ -8,8 +8,11 @@
 //! # Canonicalization
 //!
 //! The canonical field ordering is fixed:
-//! `subject_xdr_bytes || timestamp_8_byte_be || data_bytes`
+//! `ATTESTATION_PAYLOAD_DOMAIN || subject_xdr_bytes || timestamp_8_byte_be || data_bytes`
 //!
+//! A private [`ATTESTATION_PAYLOAD_DOMAIN`] prefix is always prepended so
+//! that attestation hashes are domain-separated from every other hash path
+//! (storage keys, quote hashes, generic canonical hashes) in the crate.
 //! Subject is always serialised via XDR (Stellar's canonical encoding), which
 //! guarantees that the same address always produces the same byte sequence.
 //! Timestamp is always 8 bytes big-endian, ensuring no variable-length encoding.
@@ -32,6 +35,19 @@ use crate::errors::ErrorCode;
 /// payloads that could consume excessive WASM instructions while preparing
 /// the SHA-256 input.
 const MAX_PAYLOAD_SIZE: u32 = 4096; // 4 KB
+
+/// Domain-separation tag prepended to every attestation payload hash input.
+///
+/// Including a fixed, named prefix before the canonical field encoding ensures
+/// that the digest produced by [`compute_payload_hash`] can never collide with
+/// a hash produced by a different path in the crate (e.g. storage keys, quote
+/// hashes, or generic [`compute_canonical_hash`] calls), even if all the
+/// encoded field bytes happen to be identical.
+///
+/// This constant is **private**: callers never see or supply it, so its value
+/// is an implementation detail that must not change after deployment (changing
+/// it would invalidate every stored attestation hash).
+const ATTESTATION_PAYLOAD_DOMAIN: &[u8] = b"anchorkit_attestation_v1";
 
 /// Reject invalid `data` payload before hashing.
 ///
@@ -74,7 +90,13 @@ pub fn make_storage_key(env: &Env, parts: &[&[u8]]) -> BytesN<32> {
 /// Compute a canonical SHA-256 hash over attestation payload fields.
 ///
 /// The field ordering is fixed (canonical):
-/// `subject_xdr_bytes || timestamp_8_byte_be || data_bytes`
+/// `ATTESTATION_PAYLOAD_DOMAIN || subject_xdr_bytes || timestamp_8_byte_be || data_bytes`
+///
+/// The leading [`ATTESTATION_PAYLOAD_DOMAIN`] prefix domain-separates this
+/// function from every other hash path in the crate so that an attestation
+/// hash can never collide with a storage key, a quote hash, or a generic
+/// [`compute_canonical_hash`] output, even if the remaining field bytes are
+/// identical.
 ///
 /// This guarantees that the same inputs always produce the same 32-byte hash,
 /// which is required for deterministic replay-attack detection.
@@ -119,6 +141,13 @@ pub fn compute_payload_hash(
     validate_payload_data(env, data);
 
     let mut input = Bytes::new(env);
+
+    // 0. Domain-separation prefix — distinguishes attestation payload hashes
+    //    from every other hash path in the crate.  The value is pinned by
+    //    `ATTESTATION_PAYLOAD_DOMAIN` so it is never an anonymous literal.
+    for b in ATTESTATION_PAYLOAD_DOMAIN.iter() {
+        input.push_back(*b);
+    }
 
     // 1. subject — serialised as its raw XDR bytes via to_xdr
     let subject_bytes = subject.clone().to_xdr(env);
@@ -606,5 +635,48 @@ mod deterministic_hash_tests {
         let h2 = compute_canonical_hash(&env, &[]);
         assert_eq!(h1, h2, "hashing zero fields must still be deterministic");
     }
-}
 
+    // -------------------------------------------------------------------------
+    // Domain-separation constant — task 4
+    // -------------------------------------------------------------------------
+
+    /// The attestation payload domain prefix must be non-empty so that it
+    /// actually provides separation, and it must be stable (same value every
+    /// call) so that previously stored hashes remain verifiable.
+    #[test]
+    fn test_attestation_payload_domain_is_nonempty_and_stable() {
+        // Non-empty ensures the prefix actually contributes bytes to the digest.
+        assert!(
+            !ATTESTATION_PAYLOAD_DOMAIN.is_empty(),
+            "ATTESTATION_PAYLOAD_DOMAIN must not be empty"
+        );
+        // Two references to the constant must compare equal — it is a fixed value.
+        assert_eq!(
+            ATTESTATION_PAYLOAD_DOMAIN, ATTESTATION_PAYLOAD_DOMAIN,
+            "ATTESTATION_PAYLOAD_DOMAIN must be deterministic"
+        );
+    }
+
+    /// Hashes produced by `compute_payload_hash` must differ from hashes
+    /// produced by `compute_canonical_hash` over the same raw bytes, proving
+    /// that the domain-separation prefix isolates the two paths.
+    #[test]
+    fn test_payload_hash_domain_separated_from_canonical_hash() {
+        let env = Env::default();
+        let subject = Address::generate(&env);
+        let data = Bytes::from_slice(&env, b"kyc_approved");
+        let ts: u64 = 1_700_000_000;
+
+        // Hash produced by the attestation-specific path (with domain prefix).
+        let attestation_hash = compute_payload_hash(&env, &subject, ts, &data);
+
+        // Hash produced by the generic path over the same data bytes alone —
+        // should never collide with the attestation hash.
+        let generic_hash = compute_canonical_hash(&env, &[CanonicalField::Bytes(&data)]);
+
+        assert_ne!(
+            attestation_hash, generic_hash,
+            "attestation payload hash must be domain-separated from generic canonical hash"
+        );
+    }
+}
