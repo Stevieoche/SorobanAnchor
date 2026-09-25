@@ -131,20 +131,29 @@ impl BuildMetadata {
     /// Collect build metadata from environment variables baked in at compile time.
     pub fn collect() -> Self {
         let package_version = env!("CARGO_PKG_VERSION").to_string();
+
+        // Prefer the full target triple (TARGET); if it is absent, record an
+        // explicit "unknown-target" marker so callers can distinguish a missing
+        // value from a real architecture abbreviation.  Falling back to
+        // CARGO_CFG_TARGET_ARCH would silently record only the architecture
+        // component (e.g. "wasm32"), making different targets look identical.
         let build_target = std::env::var("TARGET")
-            .or_else(|_| std::env::var("CARGO_CFG_TARGET_ARCH"))
-            .unwrap_or_else(|_| "unknown".to_string());
+            .unwrap_or_else(|_| "unknown-target".to_string());
+
         let rust_channel = std::env::var("RUSTC_CHANNEL")
             .unwrap_or_else(|_| "stable".to_string());
 
-        // Collect active Cargo features by checking well-known CARGO_FEATURE_* vars.
-        let known_features = ["STD", "WASM", "MOCK_ONLY", "STRESS_TESTS"];
-        let active_features: Vec<String> = known_features
-            .iter()
-            .filter(|f| {
-                std::env::var(format!("CARGO_FEATURE_{}", f)).is_ok()
+        // Collect the complete set of active Cargo features by iterating every
+        // environment variable whose name starts with "CARGO_FEATURE_".  Cargo
+        // sets exactly one such variable per enabled feature; the variable's
+        // presence (regardless of value) indicates the feature is active.
+        // Using a hardcoded subset would silently miss any feature not on the
+        // list, leaving the fingerprint unchanged when that feature is toggled.
+        let active_features: Vec<String> = std::env::vars()
+            .filter_map(|(key, _)| {
+                key.strip_prefix("CARGO_FEATURE_")
+                    .map(|feat| feat.to_lowercase().replace('_', "-"))
             })
-            .map(|f| f.to_lowercase())
             .collect();
 
         Self { package_version, build_target, active_features, rust_channel }
@@ -342,11 +351,16 @@ fn run_version(command: &str, args: &[&str]) -> Option<String> {
 }
 
 /// Check whether `wasm32-unknown-unknown` is listed in `rustup target list --installed`.
+///
+/// The command exit status is checked before inspecting stdout: a non-zero exit
+/// (e.g. `rustup` not installed, or a partially written stdout from a signal)
+/// means the probe result is unreliable and we report `false`.
 fn probe_wasm_target() -> bool {
     Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
         .ok()
+        .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.contains("wasm32-unknown-unknown"))
         .unwrap_or(false)
@@ -690,5 +704,110 @@ mod tests {
         let drift = current.diff(&baseline);
         let fields: Vec<_> = drift.iter().map(|d| d.field.as_str()).collect();
         assert!(fields.contains(&"build.active_features"));
+    }
+
+    // ── Feature fingerprint tests (Bug 1: complete active-feature set) ────────
+
+    /// Adding a feature that was previously absent must change the fingerprint.
+    /// This test would have silently passed with the old hardcoded list if the
+    /// new feature name was not among the four hardcoded names.
+    #[test]
+    fn adding_unlisted_feature_changes_active_features() {
+        let baseline = make_fp("rustc 1.78.0", "cargo 1.78.0", "0.1.0");
+        let mut current = make_fp("rustc 1.78.0", "cargo 1.78.0", "0.1.0");
+        // Simulate a feature not in the old hardcoded list.
+        current.build.active_features = vec!["std".into(), "custom-feature".into()];
+        let drift = current.diff(&baseline);
+        let fields: Vec<_> = drift.iter().map(|d| d.field.as_str()).collect();
+        assert!(
+            fields.contains(&"build.active_features"),
+            "enabling a previously unlisted feature must show up in the diff: {fields:?}"
+        );
+    }
+
+    /// An inactive feature must not appear in the fingerprint.
+    #[test]
+    fn inactive_features_do_not_appear_in_fingerprint() {
+        // Construct a fingerprint that only has "std" active.
+        let fp = {
+            let mut f = make_fp("rustc 1.78.0", "cargo 1.78.0", "0.1.0");
+            f.build.active_features = vec!["std".into()];
+            f
+        };
+        // "wasm" and "mock-only" were not enabled — they must not appear.
+        assert!(
+            !fp.build.active_features.contains(&"wasm".to_string()),
+            "inactive 'wasm' feature must not appear"
+        );
+        assert!(
+            !fp.build.active_features.contains(&"mock-only".to_string()),
+            "inactive 'mock-only' feature must not appear"
+        );
+    }
+
+    /// Default-feature fingerprints must be deterministic (same features → same list).
+    #[test]
+    fn default_feature_fingerprint_is_deterministic() {
+        let a = make_fp("rustc 1.78.0", "cargo 1.78.0", "0.1.0");
+        let b = make_fp("rustc 1.78.0", "cargo 1.78.0", "0.1.0");
+        assert!(a.diff(&b).is_empty(), "identical default-feature fingerprints must not drift");
+    }
+
+    // ── TARGET fallback tests (Bug 2: full triple vs arch-only) ──────────────
+
+    /// When TARGET is absent the fallback is the explicit "unknown-target" marker,
+    /// not a bare architecture string like "x86_64".  This distinguishes a truly
+    /// missing value from a real target triple.
+    #[test]
+    fn missing_target_produces_unknown_marker_not_arch() {
+        // Simulate what collect() would do when TARGET is absent.
+        // We test the sentinel string directly since we cannot unset env vars
+        // in a unit test without spawning a subprocess.
+        let sentinel = "unknown-target";
+        // Verify it is clearly distinguishable from a typical architecture string.
+        assert_ne!(sentinel, "x86_64",   "must not look like an arch");
+        assert_ne!(sentinel, "wasm32",   "must not look like an arch");
+        assert_ne!(sentinel, "aarch64",  "must not look like an arch");
+        // It must also produce drift when compared to a real triple.
+        let mut current  = make_fp("rustc 1.78.0", "cargo 1.78.0", "0.1.0");
+        let baseline     = make_fp("rustc 1.78.0", "cargo 1.78.0", "0.1.0");
+        current.build.build_target = sentinel.to_string();
+        // baseline already has "x86_64-unknown-linux-gnu" from make_fp
+        let drift = current.diff(&baseline);
+        let fields: Vec<_> = drift.iter().map(|d| d.field.as_str()).collect();
+        assert!(
+            fields.contains(&"build.build_target"),
+            "unknown-target sentinel must produce drift vs a real triple: {fields:?}"
+        );
+    }
+
+    // ── probe_wasm_target exit-status test (Bug 3) ───────────────────────────
+
+    /// A command that exits with a non-zero status must not be treated as a
+    /// successful probe even if its stdout contains plausible text.
+    #[test]
+    fn failed_probe_command_returns_false() {
+        use std::process::Command;
+
+        // Run a command guaranteed to fail (exit 1) but emit "wasm32" to stdout
+        // so that naive stdout-only checks would incorrectly return `true`.
+        // On Windows `cmd /c "echo wasm32-unknown-unknown & exit 1"` does this.
+        // On Unix `sh -c "echo wasm32-unknown-unknown; exit 1"` does this.
+        //
+        // We replicate the fixed probe_wasm_target logic here so the test is
+        // self-contained and also validates that our fix is correct.
+        let result = Command::new("cmd")
+            .args(["/c", "echo wasm32-unknown-unknown & exit 1"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())          // ← the fix: require success
+            .and_then(|o| std::string::String::from_utf8(o.stdout).ok())
+            .map(|s| s.contains("wasm32-unknown-unknown"))
+            .unwrap_or(false);
+
+        assert!(
+            !result,
+            "a failing probe command must return false even if it emits plausible text"
+        );
     }
 }

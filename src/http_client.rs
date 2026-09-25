@@ -241,15 +241,22 @@ impl OutboundRequestOptions {
     /// Build the extra headers that should be sent with an outbound request.
     ///
     /// Returns a list of `(header_name, header_value)` pairs.
-    /// - `Idempotency-Key` — when `idempotency_key` is set.
+    /// - `Idempotency-Key` — when `idempotency_key` is set to a non-empty value.
     /// - `X-Request-Id` — same value as `Idempotency-Key` (correlation).
     /// - `X-Anchor-Signature: sha256=<hex>` — when `signing_key` is set.
     /// - `traceparent`, `X-Trace-Id`, `X-Span-Id` — when `trace` is set.
     pub fn build_headers(&self, body: &str) -> alloc::vec::Vec<(String, String)> {
         let mut headers = alloc::vec::Vec::new();
+        // Only emit the idempotency key when it is non-empty, consistent with
+        // `has_idempotency_key`.  An empty `Some("")` is treated the same as
+        // `None` — it would produce an `Idempotency-Key: ` header with a blank
+        // value, which is useless for deduplication and inconsistent with how
+        // `has_idempotency_key` reports the key's presence.
         if let Some(ref key) = self.idempotency_key {
-            headers.push(("Idempotency-Key".into(), key.clone()));
-            headers.push(("X-Request-Id".into(), key.clone()));
+            if !key.is_empty() {
+                headers.push(("Idempotency-Key".into(), key.clone()));
+                headers.push(("X-Request-Id".into(), key.clone()));
+            }
         }
         if let Some(ref sk) = self.signing_key {
             let sig = compute_hmac_hex(sk, body);
@@ -2721,5 +2728,69 @@ mod tests {
         assert!(ConnectionPolicy::default().max_redirects >= 1);
         assert!(build_client(None, 5).is_ok());
         assert!(build_client(None, 0).is_ok());
+    }
+
+    // ── Idempotency-Key empty-key consistency (Bug 4) ─────────────────────────
+
+    /// `build_headers` must not emit an `Idempotency-Key` header when the key
+    /// is `Some("")` — consistent with `has_idempotency_key` which already
+    /// treats an empty `Some` as absent.
+    #[test]
+    fn build_headers_empty_some_idempotency_key_emits_no_header() {
+        let opts = OutboundRequestOptions {
+            idempotency_key: Some(alloc::string::String::new()),
+            signing_key: None,
+            trace: None,
+            credentials: None,
+        };
+        // has_idempotency_key must agree: empty key is absent.
+        assert!(!opts.has_idempotency_key(), "has_idempotency_key should be false for Some(\"\")");
+        let headers = opts.build_headers("body");
+        let names: alloc::vec::Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !names.contains(&"Idempotency-Key"),
+            "build_headers must not emit Idempotency-Key for an empty key, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"X-Request-Id"),
+            "build_headers must not emit X-Request-Id for an empty key, got: {names:?}"
+        );
+    }
+
+    /// A non-empty idempotency key must still be emitted exactly once.
+    #[test]
+    fn build_headers_non_empty_idempotency_key_emits_header_once() {
+        let opts = OutboundRequestOptions::with_idempotency_key("txn-xyz");
+        assert!(opts.has_idempotency_key());
+        let headers = opts.build_headers("body");
+        let ik_count = headers.iter().filter(|(k, _)| k == "Idempotency-Key").count();
+        let ri_count = headers.iter().filter(|(k, _)| k == "X-Request-Id").count();
+        assert_eq!(ik_count, 1, "Idempotency-Key should appear exactly once");
+        assert_eq!(ri_count, 1, "X-Request-Id should appear exactly once");
+        // The value must be the key itself.
+        let val = headers.iter().find(|(k, _)| k == "Idempotency-Key").map(|(_, v)| v.as_str());
+        assert_eq!(val, Some("txn-xyz"));
+    }
+
+    /// `has_idempotency_key` and `build_headers` must agree: if `has_idempotency_key`
+    /// returns `false`, no `Idempotency-Key` header is emitted and vice versa.
+    #[test]
+    fn has_idempotency_key_and_build_headers_are_consistent() {
+        for key in &[None, Some(""), Some("txn-001")] {
+            let opts = OutboundRequestOptions {
+                idempotency_key: key.map(|s| s.to_string()),
+                signing_key: None,
+                trace: None,
+                credentials: None,
+            };
+            let reported = opts.has_idempotency_key();
+            let emitted = opts.build_headers("x")
+                .iter()
+                .any(|(k, _)| k == "Idempotency-Key");
+            assert_eq!(
+                reported, emitted,
+                "has_idempotency_key={reported} but Idempotency-Key emitted={emitted} for key={key:?}"
+            );
+        }
     }
 }
