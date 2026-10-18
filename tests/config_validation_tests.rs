@@ -314,3 +314,181 @@ fn valid_config_still_parses_through_schema_path() {
     let result = parse_runtime_config_str(good, ConfigFormat::Json);
     assert!(result.is_ok(), "valid config should pass schema validation: {:?}", result);
 }
+
+
+// ── Schema boundary: session_timeout_seconds maximum (86400) ─────────────────
+//
+// The schema pins operator-facing limits on session settings, registry size,
+// and audit retention. This pair exercises one configured maximum
+// (sessions.session_timeout_seconds) at the allowed value and one unit beyond
+// it so the boundary stays intentional and drift between validation and
+// documentation surfaces here. Both cases run through the production
+// parse_runtime_config_str path (schema validation + typed deserialization +
+// semantic validation). No schema limits are changed by this test.
+
+#[test]
+fn session_timeout_at_maximum_is_accepted() {
+    let json = r#"{
+  "contract": { "name": "my-anchor", "version": "1.0.0", "network": "stellar-testnet" },
+  "attestors": {
+    "registry": [{
+      "name": "kyc-issuer",
+      "address": "GBBD6A7KNZF5WNWQEPZP5DYJD2AYUTLXRB6VXJ4RCX4RTNPPQVNF3GQ",
+      "role": "kyc-issuer",
+      "enabled": true
+    }]
+  },
+  "sessions": { "session_timeout_seconds": 86400 }
+}"#;
+    let result = parse_runtime_config_str(json, ConfigFormat::Json);
+    assert!(
+        result.is_ok(),
+        "session_timeout_seconds at the configured maximum (86400) should be accepted: {:?}",
+        result
+    );
+}
+
+#[test]
+fn session_timeout_one_over_maximum_is_rejected() {
+    let json = r#"{
+  "contract": { "name": "my-anchor", "version": "1.0.0", "network": "stellar-testnet" },
+  "attestors": {
+    "registry": [{
+      "name": "kyc-issuer",
+      "address": "GBBD6A7KNZF5WNWQEPZP5DYJD2AYUTLXRB6VXJ4RCX4RTNPPQVNF3GQ",
+      "role": "kyc-issuer",
+      "enabled": true
+    }]
+  },
+  "sessions": { "session_timeout_seconds": 86401 }
+}"#;
+    let result = parse_runtime_config_str(json, ConfigFormat::Json);
+    assert!(
+        result.is_err(),
+        "session_timeout_seconds one unit above the maximum (86401) should be rejected"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("schema validation failed"),
+        "over-limit value should be rejected by the schema validation path, got: {err}"
+    );
+    assert!(
+        err.contains("session_timeout_seconds"),
+        "error should reference the bounded field, got: {err}"
+    );
+}
+
+// ── Required-property regression: attestors.registry ──────────────────────────
+//
+// The schema marks `attestors.registry` as required (minItems 1). Removing it
+// must fail through the production validator with an intelligible error that
+// references the missing property or its containing path. This complements the
+// existing schema_rejects_missing_required_property test (which covers
+// contract.network) by protecting the registry key, a nested required property.
+
+#[test]
+fn missing_attestors_registry_is_rejected() {
+    let bad = r#"{
+  "contract": { "name": "my-anchor", "version": "1.0.0", "network": "stellar-testnet" },
+  "attestors": {}
+}"#;
+    let result = parse_runtime_config_str(bad, ConfigFormat::Json);
+    assert!(result.is_err(), "missing attestors.registry should be rejected");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("attestors") || err.contains("registry"),
+        "error should reference the attestors/registry path, got: {err}"
+    );
+}
+
+// ── Duplicate attestor address: current behavior regression ──────────────────
+//
+// The semantic validator rejects duplicate attestor *names* but does NOT reject
+// duplicate attestor *addresses*. Two registry entries sharing the same on-chain
+// address (with distinct names and roles) currently parse successfully.
+//
+// This is a known limitation, not an enforced policy. This test pins the
+// current behavior so any future change (e.g., introducing a duplicate-address
+// check) must intentionally update this regression rather than silently shifting
+// validation semantics. Per the issue scope, no new registry policy is added
+// here; the three example configuration pairs continue to validate unchanged.
+
+#[test]
+fn duplicate_attestor_address_is_currently_accepted() {
+    // Two attestors share the same address but have unique names and roles.
+    let json = r#"{
+  "contract": { "name": "my-anchor", "version": "1.0.0", "network": "stellar-testnet" },
+  "attestors": {
+    "registry": [
+      {
+        "name": "kyc-issuer",
+        "address": "GBBD6A7KNZF5WNWQEPZP5DYJD2AYUTLXRB6VXJ4RCX4RTNPPQVNF3GQ",
+        "role": "kyc-issuer",
+        "enabled": true
+      },
+      {
+        "name": "transfer-verifier",
+        "address": "GBBD6A7KNZF5WNWQEPZP5DYJD2AYUTLXRB6VXJ4RCX4RTNPPQVNF3GQ",
+        "role": "transfer-verifier",
+        "enabled": true
+      }
+    ]
+  }
+}"#;
+    let result = parse_runtime_config_str(json, ConfigFormat::Json);
+    assert!(
+        result.is_ok(),
+        "duplicate attestor addresses are currently accepted (documented limitation): {:?}",
+        result
+    );
+}
+
+// ── JSON/TOML example parity ──────────────────────────────────────────────────
+//
+// The repository ships JSON and TOML versions of each deployment example. This
+// guard ensures each pair agrees on the required deployment fields (contract
+// identity and network) and the attestor registry entries (the core
+// configuration that downstream validation depends on). Optional display fields
+// such as admin_address, description, endpoint, and contact_email are permitted
+// to differ between formats and are intentionally not compared. Both files are
+// loaded through the production load_runtime_config_file path; no new runtime
+// dependency is introduced.
+
+#[test]
+fn json_toml_config_pairs_agree_on_required_fields() {
+    let pairs: &[(&str, &str, &str)] = &[
+        ("fiat-on-off-ramp", "configs/fiat-on-off-ramp.json", "configs/fiat-on-off-ramp.toml"),
+        ("remittance-anchor", "configs/remittance-anchor.json", "configs/remittance-anchor.toml"),
+        ("stablecoin-issuer", "configs/stablecoin-issuer.json", "configs/stablecoin-issuer.toml"),
+    ];
+
+    for (label, json_path, toml_path) in pairs {
+        let json_cfg = load_runtime_config_file(json_path)
+            .unwrap_or_else(|e| panic!("{label}: JSON config failed to load: {e}"));
+        let toml_cfg = load_runtime_config_file(toml_path)
+            .unwrap_or_else(|e| panic!("{label}: TOML config failed to load: {e}"));
+
+        // Required contract deployment fields.
+        assert_eq!(json_cfg.contract.name, toml_cfg.contract.name, "{label}: contract.name mismatch");
+        assert_eq!(json_cfg.contract.version, toml_cfg.contract.version, "{label}: contract.version mismatch");
+        assert_eq!(json_cfg.contract.network, toml_cfg.contract.network, "{label}: contract.network mismatch");
+
+        // Attestor registry: same count, and each entry agrees on its required
+        // fields (name, address, role, enabled).
+        let json_registry = &json_cfg.attestors.registry;
+        let toml_registry = &toml_cfg.attestors.registry;
+        assert_eq!(
+            json_registry.len(),
+            toml_registry.len(),
+            "{label}: attestors.registry length mismatch (JSON={} TOML={})",
+            json_registry.len(),
+            toml_registry.len()
+        );
+        for (index, (j, t)) in json_registry.iter().zip(toml_registry.iter()).enumerate() {
+            assert_eq!(j.name, t.name, "{label}: registry[{index}].name mismatch");
+            assert_eq!(j.address, t.address, "{label}: registry[{index}].address mismatch");
+            assert_eq!(j.role, t.role, "{label}: registry[{index}].role mismatch");
+            assert_eq!(j.enabled, t.enabled, "{label}: registry[{index}].enabled mismatch");
+        }
+    }
+}
